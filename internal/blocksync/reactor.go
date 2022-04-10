@@ -456,8 +456,6 @@ func (r *Reactor) poolRoutine(ctx context.Context, stateSynced bool, blockSyncCh
 				"height", height,
 			)
 
-			r.logger.Error("XXXXXXX", "startHeight", r.pool.startHeight, "InitialHeight", state.InitialHeight, "blocksSynced", blocksSynced)
-
 			switch {
 			//case state.LastBlockHeight > 0 && r.store.LoadBlockExtCommit(state.LastBlockHeight) == nil:
 			case state.LastBlockHeight > 0 && blocksSynced == 0:
@@ -465,7 +463,7 @@ func (r *Reactor) poolRoutine(ctx context.Context, stateSynced bool, blockSyncCh
 				r.logger.Info(
 					"no seen commit yet",
 					"height", height,
-					"startHeight", r.pool.startHeight,
+					"last_block_height", state.LastBlockHeight,
 					"initial_height", state.InitialHeight,
 					"max_peer_height", r.pool.MaxPeerHeight(),
 					"timeout_in", syncTimeout-time.Since(lastAdvance),
