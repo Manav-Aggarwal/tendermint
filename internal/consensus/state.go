@@ -684,19 +684,15 @@ func (cs *State) sendInternalMessage(ctx context.Context, mi msgInfo) {
 // Reconstruct LastCommit from SeenCommit, which we saved along with the block,
 // (which happens even before saving the state)
 func (cs *State) reconstructLastCommit(state sm.State) {
-	commit := cs.blockStore.LoadSeenCommit()
-	if commit == nil || commit.Height != state.LastBlockHeight {
-		commit = cs.blockStore.LoadBlockCommit(state.LastBlockHeight)
-	}
-
-	if commit == nil {
+	extCommit := cs.blockStore.LoadBlockExtCommit(state.LastBlockHeight)
+	if extCommit == nil {
 		panic(fmt.Sprintf(
 			"failed to reconstruct last commit; commit for height %v not found",
 			state.LastBlockHeight,
 		))
 	}
 
-	lastPrecommits := types.CommitToVoteSet(state.ChainID, commit, state.LastValidators)
+	lastPrecommits := extCommit.ToVoteSet(state.ChainID, state.LastValidators)
 	if !lastPrecommits.HasTwoThirdsMajority() {
 		panic("failed to reconstruct last commit; does not have +2/3 maj")
 	}
@@ -1389,16 +1385,17 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 		return nil, errors.New("entered createProposalBlock with privValidator being nil")
 	}
 
-	var commit *types.Commit
+	//TODO: wouldn't it be easier if CreateProposalBlock accepted cs.LastCommit directly?
+	var extCommit *types.ExtendedCommit
 	switch {
 	case cs.Height == cs.state.InitialHeight:
 		// We're creating a proposal for the first block.
 		// The commit is empty, but not nil.
-		commit = types.NewCommit(0, 0, types.BlockID{}, nil)
+		extCommit = types.NewExtendedCommit(0, 0, types.BlockID{}, nil)
 
 	case cs.LastCommit.HasTwoThirdsMajority():
 		// Make the commit from LastCommit
-		commit = cs.LastCommit.MakeCommit()
+		extCommit = cs.LastCommit.MakeExtendedCommit()
 
 	default: // This shouldn't happen.
 		cs.logger.Error("propose step; cannot propose anything without commit for the previous block")
@@ -1414,7 +1411,7 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 
 	proposerAddr := cs.privValidatorPubKey.Address()
 
-	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.state, commit, proposerAddr, cs.LastCommit.GetVotes())
+	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.state, extCommit, proposerAddr)
 	if err != nil {
 		panic(err)
 	}
@@ -1912,8 +1909,7 @@ func (cs *State) finalizeCommit(ctx context.Context, height int64) {
 		// NOTE: the seenCommit is local justification to commit this block,
 		// but may differ from the LastCommit included in the next block
 		precommits := cs.Votes.Precommits(cs.CommitRound)
-		seenCommit := precommits.MakeCommit()
-		cs.blockStore.SaveBlock(block, blockParts, seenCommit)
+		cs.blockStore.SaveBlock(block, blockParts, precommits.MakeExtendedCommit())
 	} else {
 		// Happens during replay if we already saved the block but didn't commit
 		logger.Debug("calling finalizeCommit on already stored block", "height", block.Height)
