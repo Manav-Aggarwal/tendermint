@@ -26,7 +26,9 @@ should be able to determine that each party signed the designated messages.
 where, given a message and the signature, a verifier is able to determine that
 a large enough share of the parties signed the message. The identifies of the
 parties that contributed to the signature are not revealed.
-* **BLS Signature**:
+* **BLS Signature**: An elliptic-curve pairing based signature system that
+has some nice properties for short multi-signatures. May stand for
+*Boneh-Lynn-Schacham* or *Barreto-Lynn-Scott* depending on the context.
 * **Interactive**: Cryptographic scheme where parties need to perform one or
 more request-response cycles to produce the cryptographic material.
 * **Non-interactive**: Cryptographic scheme where parties do not need to
@@ -34,35 +36,21 @@ perform any request-response cycles to produce the cryptographic material.
 
 ### Adoption
 
-* RELIC
-* AMCL
-* Algorand
-* Zcash
-* Ethereum 2.0
+* Algorand is working on an implementation.
+* [Zcash][zcash-adoption] has adopted BLS12-381 into the protocol.
+* [Ethereum 2.0][eth-2-adoption] has adopted BLS12-381 into the protocol.
 * Chia Network
 https://tools.ietf.org/id/draft-yonezawa-pairing-friendly-curves-02.html#adoption
 
 
 ### What systems may be affected by adding aggregated signatures?
-* All systems that rely on verifying commits:
-  * Light client
-  * IBC
-  * Consensus
-  * Block Sync
-  * State Sync ? 
-
-* All systems that rely on producing commits:
-  * Light client
-  * IBC
-  * Consensus
-  * Block Sync
-  * State Sync ? 
 
 #### Gossip
 
 Gossip could be updated to aggregate vote signatures during a consensus round.
-This appears to be of frankly little utility. If a validator has seen 
-a subset of votes
+This appears to be of frankly little utility. Creating an aggregated signature
+is not a fast operation, so frequently re-aggregating will incur a significant
+overhead. [IS THIS TRUE?]
 
 Additionally, each validator will still need to receive vote extension data
 from the peer validators in order for consensus to proceed. As a result, any
@@ -75,22 +63,25 @@ the interactions between the gossip code and the consensus state machine.
 
 #### Block Creation
 
-When creating a block, the proposer may create a multi-signature and attach
-this to the block instead of including one signature per validator.
+When creating a block, the proposer may create a small set of short
+multi-signatures and attach these to the block instead of including one
+signature per validator.
 
 #### Block Verification
 
-Verification of blocks would no verify a set of many signatures. Verification
-would instead check the single multi-signature.
+Verification of blocks would not verify a set of many signatures. Verification
+would instead check the single multi-signature using the public keys stored
+by the validator. Currently, we verify each validator signature using
+the public key associated with that validator.
 
-* where do we keep the 'public-key' in this system?
+#### IBC Packet Relaying
 
-#### IBC Verification
-
-IBC would no longer need to transmit a large set of signatures and would 
-instead just transmit the aggregated signature across. I think this is true.
-
-Where would it store/fetch the 'public key'?
+IBC would no longer need to transmit a large set of signatures and would
+instead just transmit the aggregated signature across when updating state.
+In my understanding, to update the state of a IBC channel, you need to submit
+a Tendermint Header, complete with commit signatures, to the chain. Adding
+BLS signatures would mean creating a new signature type that could be
+understood by the IBC module and relayer.
 
 ## Discussion
 
@@ -110,18 +101,30 @@ Where would it store/fetch the 'public key'?
    for signatures
 	384 x 2 + encoding of S (150 bits) = 1174
 	// why did I assume I need 2 signatures????
+	// One for 'yes', one for 'no'
 
 	(1174 * 10045594) = 1.47 GB for the whole chain.
 $ .026 per GB on GCP = a savings of $ 2.46 a month
 
-#### Constant-Time Signature verification?
+#### Reduce IBC Packet Size
 
+#### Reduce Light-Client Verification Time
+
+#### Reduce Signature Verification Time
 
 #### Reduce Gossip Bandwidth
 
-* Allow for smaller IBC Packets in Cosmos-> Tendermint headers will only require
-one signature Perform signature aggregation during gossip to reduce total
-bandwidth.
+##### Vote
+
+It is possible to aggregate signatures during voting and not need to gossip all 
+*n* validator signatures to all other validators. Theoretically, subsets of
+the signatures could be aggregated during consensus to produce vote messages
+carrying aggregated signatures.
+
+*Q*: Can you disaggregate signatures?
+*Q*: Can you aggregate a signature twice?
+
+##### Block
 
 * Speed of signature verification
 * What speed is claimed by signature verification for by our signature aggregation library?
@@ -197,15 +200,69 @@ that will verify against a pubkey for which it does not have the private key
 #### Do common HSMs support BLS signatures?
 * yubikey: no
 * Ledger: G1 but not G2, no Ledger is not supported really
+	*Q* would our use of SigAg allow ledger to work here? 
 * Cloud HSM: no
 
 ### Can aggregated signatures be added as soft-upgrades?
 
-### Implementing vote-time and block-time signature aggregation separately
+In my estimation, yes. With the implementation of proposer-based timestamps, 
+all validators now produce signatures on only one of two messages:
 
-#### Separable implementation
+1. A [CanonicalVote]() where the BlockID is the hash of the block or
+2. A `CanonicalVote` where the `BlockID` is nil.
 
-#### Simultaneous implementation
+The block structure can be updated to perform hashing and validation in a new
+way as a soft upgrade. This would look like adding a new section to the [Block.Commit][] structure
+alongside the current `Commit.Signatures` field. This new field, tentatively named
+`AggregatedSignature` would contain the following structure:
+
+```proto
+message AggregatedSignature {
+  // yays is a BitArray representing which validators in the active validator
+  // set issued a 'yay' vote for the block.
+  tendermint.libs.bits.BitArray yays = 1;
+
+  // absent is a BitArray representing which validators in the active
+  // validator set did not issue votes for the block.
+  tendermint.libs.bits.BitArray abstent = 2;
+
+  // yay_signature is an aggregated signature produced from all of the vote
+  // signatures for the block.
+  repeated bytes yay_signature = 3;
+
+  // yay_signature is an aggregated signature produced from all of the vote
+  // signatures from votes for 'nil' for this block.
+  // nay_signature should be made from all of the validators that were both not
+  // in the 'yays' BitArray and not in the 'absent' BitArray.
+  repeated bytes nay_signature = 4;
+}
+```
+
+Adding this new field as a soft upgrade would mean hashing this data structure
+into the blockID along with the old `Commit.Signatures` when both are present
+as well as ensuring that the voting power represented in the new
+`AggregatedSignature` and `Signatures` field was enough to commit the block
+during block validation. One can certainly imagine other possible schemes for
+implementing this but the above should serve as a simple enough proof of concept.
+
+### Implementing vote-time and commit-time signature aggregation separately
+
+Implementing aggregated BLS signatures as part of the block structure can easily be
+achieved without implementing any 'vote-time' signature aggregation.
+The block proposer would gather all of the votes, complete with signatures,
+as it does now, and produce a set of aggregate signatures from all of the
+individual vote signatures.
+
+Implementing 'vote-time' signature aggregation cannot be achieved without
+also implementing commit-time signature aggregation. This is because such
+signatures cannot be dis-aggregated into their constituent pieces. Therefore,
+in order to implement 'vote-time' signature aggregation, we would need to
+either first implement 'commit-time' signature aggregation, or implement both
+'vote-time' signature aggregation while also updating the block creation and
+verification protocols to allow for aggregated signatures.
+
+*Q*: can we disaggregate signatures?
+*Q*: can we re-aggregate signatures?
 
 ### References
 
@@ -219,3 +276,5 @@ that will verify against a pubkey for which it does not have the private key
 [validator-updates]: https://github.com/tendermint/tendermint/blob/441db32c8b9e8827eb6f8ee0f13f8013b979152f/internal/state/execution.go#L241
 [genesis-validators]: https://github.com/tendermint/tendermint/blob/441db32c8b9e8827eb6f8ee0f13f8013b979152f/types/genesis.go#L31
 [multi-signatures-smaller-blockchains]: https://eprint.iacr.org/2018/483.pdf
+[ibc-tendermint]: https://github.com/cosmos/ibc/tree/master/spec/client/ics-007-tendermint-client
+[zcash-adoption]: https://github.com/zcash/zcash/issues/2502
